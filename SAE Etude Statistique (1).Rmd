@@ -1,0 +1,635 @@
+---
+title: "Projet SAE Etude Stats"
+author: "Inza COULIBALY"
+date: "2026-01-09"
+output: word_document
+---
+
+
+```{r}
+ventes<- read.csv("C:/Users/jeann/Downloads/data_ventes_2022_2024.csv")
+ventes$Date<-as.Date(ventes$Date)
+ventes$Magasin<-as.factor(ventes$Magasin)
+ventes$Produit<-as.factor(ventes$Produit)
+ventes$Promotion<-as.factor(ventes$Promotion)
+ventes$Quantité_Vendue<-as.numeric(ventes$Quantité_Vendue)
+
+
+finances<- read.csv("C:/Users/jeann/Downloads/donnees_financieres_magasins_2022_2024.csv")
+finances$magasin<-as.factor(finances$magasin)
+finances$date<-as.Date(finances$date)
+
+
+```
+
+Analysez et nettoyez les données en identifiant des données atypiques et les valeurs manquantes. Proposez des méthodes adaptées pour les corriger.
+
+```{r}
+summary(ventes)
+
+summary(finances)
+
+# Vérification des NA
+sum(is.na(ventes))
+sum(is.na(finances))
+
+#Nous notons des valeurs manquantes dans le fichier des ventes sur la variable des quantités vendues
+
+library(dplyr)
+#visualisons les valeurs manquantes
+manquantes<-ventes %>%
+  group_by(Produit,Date, Magasin)%>%
+  filter(is.na(Quantité_Vendue))
+
+# on constate qu'il y a sur certaines lignes,1 produit qui manque par jour pour ce magasin. L'idée est telle que s'il n'y a qu'un  produit manquant, on se servira du chiffre d'affaires mentionné dans le fichier "finances" pour faire l'imputation en calculant le CA restant.
+
+#Pour cela nous vérifions si vraiment tous les magasins n'ont qu'un produit manquant
+problemes <- ventes %>%
+  filter(is.na(Quantité_Vendue)) %>%
+  group_by(Date, Magasin) %>%
+  summarise(
+    nb_produits_manquants = n_distinct(Produit),
+    .groups = "drop"
+  ) %>%
+  filter(nb_produits_manquants > 1)
+
+#Malheureusement, il y a plus d'un produit qui manque par jour dans laes magasins et on ne peut deviner les quantités à attribuer respectivement aux produits manquants
+
+
+
+ca_connu <- ventes %>%
+  filter(!is.na(Quantité_Vendue)) %>%
+  group_by(Date, Magasin) %>%
+  summarise(
+    CA_connu = sum(Prix_Unitaire * Quantité_Vendue),
+    .groups = "drop"
+  )
+#On constate aussi qu'en calculant le chiffre d'affaire connu et en la comparant avec le chiffre d'affaire du fichier finances, nous avons des valeurs anormalenent divergentes
+
+# Pour cela nous traiterons les fichiers différemment en dénonçant l'écart flagrant entre les valeurs théoriques e empiriques du chiffre d'affaire des magasins
+
+#Nous recourons donc à l'imputation des valeurs manquantes par regression
+
+install.packages("mice")
+library(mice)
+ventes1<-ventes
+
+imputation<-mice(ventes1,m = 1, method ="norm.predict", maxit = 5, printFlag = FALSE)
+ventes1<-complete(imputation)
+
+ventes1$Quantité_Vendue<-trunc(ventes1$Quantité_Vendue)
+summary(ventes1)
+
+ca_connu <- ventes1 %>%
+  group_by(Magasin, Date) %>%
+  summarise(
+    CA_connu = sum(Prix_Unitaire * Quantité_Vendue),
+    .groups = "drop"
+  )
+
+
+#valeurs abérantes
+#visualisation des valeurs abérantes
+library(ggplot2)
+ggplot(ventes1, aes(x = Produit, y = Quantité_Vendue)) +
+  geom_boxplot(fill = "lightblue") +
+  labs(
+    title = "Distribution des quantités vendues par produit",
+    x = "Produit",
+    y = "Quantité vendue"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+#détection des valeurs
+Q1 <- quantile(ventes1$Quantité_Vendue, 0.25, na.rm = TRUE)
+Q3 <- quantile(ventes1$Quantité_Vendue, 0.75, na.rm = TRUE)
+IQR_val <- IQR(ventes1$Quantité_Vendue, na.rm = TRUE)
+
+borne_inf <- Q1 - 1.5 * IQR_val
+borne_sup <- Q3 + 1.5 * IQR_val
+
+outliers <- ventes1 %>%
+  filter(Quantité_Vendue < borne_inf | Quantité_Vendue > borne_sup)
+
+#correction des valeurs aberrantes
+#Nous décidons de ne pas supprimer les valeurs abérantes ici mais de les corriger car dans ce contexte, les promotions appliquées peuvent expliquer pourquoi nous avons des valeurs plus importantes que la moyenne
+
+#install.packages("robustHD")
+library(robustHD)
+ventes1$Quantité_Vendue<- winsorize(ventes1$Quantité_Vendue, const = 2)
+
+
+#verification des valeurs aberantes
+ggplot(ventes1, aes(x = Produit, y = Quantité_Vendue)) +
+  geom_boxplot(fill = "lightblue") +
+  labs(
+    title = "Distribution des quantités vendues par produit",
+    x = "Produit",
+    y = "Quantité vendue"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+#on arrondit les quantités à l'excès pour avir des valeurs conformes à la réalité
+
+
+ventes1$Quantité_Vendue<-ceiling(ventes1$Quantité_Vendue)
+summary(ventes1)
+```
+
+
+
+
+
+
+
+Calculez des statistiques descriptives pour comprendre la répartition des ventes par produit, par magasin
+et sur la période étudiée.
+
+```{r}
+
+
+library(ggplot2)
+
+# Répartition des ventes par produit
+ggplot(ventes1, aes(x = Quantité_Vendue)) +
+  geom_histogram(bins = 30) +
+  facet_wrap(~ Produit, scales = "free_y")
+
+#Répartition des ventes totales par magasin
+
+ggplot(ventes1, aes(x = Quantité_Vendue)) +
+  geom_histogram(bins = 30, fill = "steelblue", color = "white") +
+  facet_wrap(~ Magasin, scales = "free_y") +
+  labs(title = "Distribution des quantités vendues par magasin",
+       x = "Quantité vendue",
+       y = "Fréquence") +
+  theme_minimal()
+
+
+stats_magasin <- ventes1 %>%
+  group_by(Magasin) %>%
+  summarise(
+    ventes_totales = sum(Quantité_Vendue, na.rm = TRUE),
+    CA_total = sum(Prix_Unitaire * Quantité_Vendue, na.rm = TRUE),
+    vente_moyenne_journaliere = mean(Quantité_Vendue, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# CA par magasin
+ggplot(stats_magasin, aes(x = Magasin, y = CA_total)) +
+  geom_col()
+
+
+#Le magasin 6  a le chiffre d'affaires le plus élevé des magasins du réseau
+
+
+```
+
+#Analyse descriptive :
+- Visualisez les ventes au cours du temps et mettez en évidence les tendances saisonnières, l’effet des
+promotions, et la différence entre la semaine et le week-end.
+
+
+```{r}
+# Création des variables saisonnières
+
+
+library(dplyr)
+library(lubridate)
+
+ventes1$Date <- as.Date(ventes1$Date)
+
+ventes1 <- ventes1 %>%
+  mutate(
+    # Jour en français
+    Jour_semaine = factor(
+      wday(Date),
+      levels = 1:7,
+      labels = c("dimanche","lundi","mardi","mercredi","jeudi","vendredi","samedi")
+    ),
+    
+    # Mois en français
+    Mois = factor(
+      month(Date),
+      levels = 1:12,
+      labels = c("Janvier","Février","Mars","Avril","Mai","Juin",
+                 "Juillet","Août","Septembre","Octobre","Novembre","Décembre")
+    ),
+    
+    Annee = year(Date),
+    
+    Saison = case_when(
+      month(Date) %in% c(3,4,5)   ~ "Printemps",
+      month(Date) %in% c(6,7,8)   ~ "Été",
+      month(Date) %in% c(9,10,11) ~ "Automne",
+      TRUE ~ "Hiver"
+    ),
+    
+    Weekend = ifelse(wday(Date) %in% c(1,7), 1, 0),
+    
+    CA_ventes = Quantité_Vendue * Prix_Unitaire
+  )
+```
+
+
+```{r}
+#  Évolution des ventes dans le temps
+library(dplyr)
+
+evolution_quantite_jour<- ventes1 %>%
+  group_by(Date) %>%
+  summarise(Quantite_totale = sum(Quantité_Vendue, na.rm = TRUE))
+
+library(ggplot2)
+
+ggplot(evolution_quantite_jour, aes(x = Date, y = Quantite_totale)) +
+  geom_line() +
+  labs(
+    title = "Évolution des quantités vendues",
+    x = "Date",
+    y = "Quantité totale vendue"
+  ) +
+  theme_minimal()
+
+```
+Commentaires: L’analyse de l’évolution temporelle des quantités vendues met en évidence une forte saisonnalité annuelle, caractérisée par des pics en période hivernale et des creux marqués durant l’été. La stabilité des cycles d’une année à l’autre suggère un comportement structurel récurrent de la demande.
+De plus, les fluctuations à court terme indiquent probablement un effet des jours de la semaine et des promotions, qui devront être intégrés dans la modélisation statistique.
+
+
+```{r}
+# Évolution du chiffre d'affaires dans le temps
+evolution_CA_Ventes_jour<- ventes1 %>%
+  group_by(Date) %>%
+  summarise(CA_total = sum(CA_ventes, na.rm = TRUE))
+
+library(ggplot2)
+
+ggplot(evolution_CA_Ventes_jour, aes(x = Date, y = CA_total)) +
+  geom_line() +
+  labs(
+    title = "Évolution du chiffre d'affaires dans le temps",
+    x = "Date",
+    y = "Chiffre d'affaires"
+  ) +
+  theme_minimal()
+
+```
+
+Commentaires: Le graphique du chiffre d’affaires montre une forte saisonnalité annuelle, avec des creux marqués en été et des pics en hiver/début d’année, phénomène qui se répète sur les deux années observées. L’amplitude des variations est importante, ce qui indique que la performance financière dépend fortement des fluctuations de la demande. On observe également des variations à court terme, probablement liées aux promotions et aux effets semaine/week-end. Aucune tendance structurelle nette à la hausse ou à la baisse ne se dégage : la saisonnalité reste le facteur dominant.
+
+
+```{r}
+
+# Quantité moyenne vendue par saison
+
+
+ventes_saison <- ventes1 %>%
+  group_by(Saison) %>%
+  summarise(Vente_moyenne = mean(Quantité_Vendue, na.rm = TRUE))
+
+ggplot(ventes_saison, aes(x = Saison, y = Vente_moyenne)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Ventes moyennes par saison",
+       x = "Saison",
+       y = "Quantité moyenne vendue") +
+  theme_minimal()
+
+```
+Commentaires: Le graphique des ventes moyennes par saison met en évidence un effet saisonnier marqué. Le printemps apparaît comme la saison la plus performante en termes de quantité moyenne vendue, suivi de l’hiver, puis de l’été, tandis que l’automne enregistre les ventes les plus faibles. Ces écarts confirment que la demande varie significativement selon la période de l’année. La saisonnalité constitue donc un facteur explicatif important des ventes et devra être intégrée dans la modélisation statistique.
+
+```{r}
+# Quantité vendue par promotions
+
+ggplot(ventes1, aes(x = factor(Promotion),
+                 y = Quantité_Vendue)) +
+  geom_boxplot() +
+  labs(title = "Impact des promotions sur les ventes",
+       x = "Promotion (0 = Non, 1 = Oui)",
+       y = "Quantité vendue") +
+  theme_minimal()
+
+```
+
+Commentaires : Le boxplot montre que les promotions ont un effet positif sur les ventes. La médiane des quantités vendues est nettement plus élevée en période de promotion que sans promotion, ce qui indique une augmentation globale de la demande lorsque des offres sont proposées. De plus, la dispersion des ventes est plus importante avec promotion, traduisant une variabilité accrue des volumes vendus. Ainsi, les promotions apparaissent comme un levier efficace pour stimuler les ventes, bien qu’elles génèrent également une plus grande hétérogénéité des résultats.
+
+
+```{r}
+
+# Quantité totale vendue par produit
+
+ventes_produit <- ventes1 %>%
+  group_by(Produit) %>%
+  summarise(Quantite_totale = sum(Quantité_Vendue, na.rm = TRUE)) %>%
+  arrange(desc(Quantite_totale))
+
+ggplot(ventes_produit, aes(x = reorder(Produit, Quantite_totale),
+                           y = Quantite_totale)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(title = "Quantité totale vendue par produit",
+       x = "Produit",
+       y = "Quantité totale vendue") +
+  theme_minimal()
+
+```
+Commentaires: Le graphique montre une répartition relativement homogène des quantités totales vendues entre les différents produits, bien que certains se démarquent. Le pain apparaît comme le produit le plus vendu, suivi du lait et des pâtes, ce qui s’explique probablement par leur caractère de produits de consommation courante. À l’inverse, le jus d’orange, le yaourt et le café figurent parmi les volumes les plus faibles. L’écart entre le produit le plus vendu et le moins vendu reste toutefois modéré, ce qui suggère une demande globalement équilibrée au sein de la gamme. Cette analyse permet d’identifier les produits moteurs du chiffre d’affaires et ceux qui pourraient faire l’objet d’actions commerciales ciblées.
+
+
+```{r}
+# Quantité totale vendue par magasin
+
+ventes_magasin <- ventes1 %>%
+  group_by(Magasin) %>%
+  summarise(Quantite_totale = sum(Quantité_Vendue, na.rm = TRUE)) %>%
+  arrange(desc(Quantite_totale))
+
+ggplot(ventes_magasin, aes(x = reorder(Magasin, Quantite_totale),
+                           y = Quantite_totale)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Quantité totale vendue par magasin",
+       x = "Magasin",
+       y = "Quantité totale vendue") +
+  theme_minimal()
+
+```
+
+Commentaires: Le graphique met en évidence des différences de performance entre les magasins. Le magasin 6 apparaît comme le plus performant en termes de quantité totale vendue, suivi des magasins 2 et 4, tandis que le magasin 3 enregistre les volumes les plus faibles. Les écarts restent toutefois modérés, ce qui suggère une performance relativement homogène à l’échelle du réseau, bien que certains magasins se distinguent positivement. Ces différences peuvent s’expliquer par des facteurs tels que la localisation, la concurrence locale, la taille du magasin ou l’efficacité des stratégies commerciales. Cette analyse permet d’identifier les magasins leaders ainsi que ceux pouvant faire l’objet d’actions d’optimisation.
+
+
+
+
+```{r}
+# Comparaison des ventes : Semaine vs Week-end"
+
+
+ggplot(ventes1, aes(x = factor(Weekend),
+                 y = Quantité_Vendue)) +
+  geom_boxplot() +
+  labs(title = "Comparaison des ventes : Semaine vs Week-end",
+       x = "Weekend (0 = Semaine, 1 = Week-end)",
+       y = "Quantité vendue") +
+  theme_minimal()
+
+```
+
+Commentaires : Le boxplot met en évidence un effet week-end sur les ventes. La médiane des quantités vendues est plus élevée le week-end que pendant la semaine, ce qui indique une demande plus importante sur cette période. La dispersion est également légèrement plus forte le week-end, suggérant une variabilité accrue des volumes vendus. Ainsi, le week-end constitue un facteur favorable aux ventes et représente une variable explicative pertinente dans l’analyse des performances commerciales.
+
+#A la recherche du magasin le plus cher
+```{r}
+# Maintenant qu'en fonction des quantités vendues, nous avons le classement des magasins, vérifions la différence des prix proposés
+
+prix_produit_magasin <- ventes1 %>%
+  group_by(Produit, Magasin) %>%
+  summarise(prix_moyen = mean(Prix_Unitaire, na.rm = TRUE),
+            .groups = "drop")
+
+
+classement_par_produit <- prix_produit_magasin %>%
+  arrange(Produit, desc(prix_moyen))
+
+classement_par_produit
+
+
+ggplot(prix_produit_magasin,
+       aes(x = reorder(Magasin, prix_moyen),
+           y = prix_moyen,
+           fill = Magasin)) +
+  geom_bar(stat = "identity") +
+  facet_wrap(~ Produit, scales = "free_y") +
+  coord_flip() +
+  labs(title = "Classement des magasins par produit selon le prix moyen",
+       x = "Magasin",
+       y = "Prix moyen") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+# on constate que les magasins proposent  pratiquement les mêmes prix sur chacun de leurs produits
+#Les quantités vendues ne peuvent se justifier que sur la base du prix mais plutôt en fonction de facteurs externes comme l'emplacement 
+```
+
+```{r}
+#Interessons nous maintenant au fonctionnement des magasins. L'objectif ici est de déterminer le magasin le plus rentable. Les charges des magasins affectent-elles leurs recettes ?
+
+# Pour cela, on commence par créer une variable "bénéfice" qui s'obtient en extrayant les charges(salaires,publicité et dépenses du fonctionnement(loyer...)) du chiffre d'affaires renseigné afin de  comparer les bénéfices moyens de chaque magasin pour avoir une idée de celui qui réussit mieux en affaires
+
+finances<-finances %>% 
+  mutate(benefice=chiffre_affaires-(masse_salariale+depenses_fonctionnement+budget_publicite))
+
+benefice_moyen <- finances %>%
+  group_by(magasin) %>%
+  summarise(benefice_moyen = mean(benefice, na.rm = TRUE))
+
+# Des analyses précédentes, les magasins les plus performants en terme de quantité vendue etaient dans l'ordre décroissant  suivant:magasin 6,2,4,5,1 et 3
+ggplot(benefice_moyen,
+       aes(x = reorder(magasin, benefice_moyen),
+           y = benefice_moyen,
+           fill = magasin)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Bénéfice moyen par magasin (ordre croissant)",
+       x = "Magasin",
+       y = "Bénéfice moyen") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+
+
+#on remarque d'après le calcul du bénéfice le classement ci-après:magasin 6,5,1,2,4 et 3
+
+# On retient qu'il y a certains magasins(magasin 4 par exemple) vendent beaucoup d'articles mais ont un bénéfice faible  comparé aux autres qui vendent moins. 
+
+#On suppose donc que les charges impactent beaucoup le fonctionnement des magasins
+
+#Déterminons la part des charge des magasins afin de déterminer le magasin qui dépense le plus proportionnellement à ses recettes
+
+```
+
+
+
+```{r}
+#Pour cela,on calcule la part des charges
+finances <- finances %>%
+  mutate(charges_totales = masse_salariale +
+                           depenses_fonctionnement +
+                           budget_publicite,
+         part_charges = charges_totales / chiffre_affaires)
+
+
+part_par_magasin <- finances %>%
+  group_by(magasin) %>%
+  summarise(part_charges_moyenne = mean(part_charges, na.rm = TRUE)) %>%
+  arrange(part_charges_moyenne)
+
+part_par_magasin
+ggplot(part_par_magasin,
+       aes(x = reorder(magasin, part_charges_moyenne),
+           y = part_charges_moyenne,
+           fill = magasin)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(title = "Part moyenne des charges dans le chiffre d’affaires",
+       x = "Magasin",
+       y = "Part des charges") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+# on observe que les magasins qui dépense le plus est le magasin 3 et celui qui dépense le moins est le magasin 6
+#Le magasin 6 vend plus que les autres et dépense le moins
+```
+
+#- Modélisation statistique 
+Construisez un ou plusieurs modèles statistiques pour estimer l’impact des facteurs suivants sur la
+quantité vendue : la saisonnalité, les promotions, les jours de la semaine, un facteur de compétition
+entre magasins, et/ou les finances des magasins.- Comparez les modèles et choisissez celui qui semble le plus adapté. Justifiez votre choix.
+```{r}
+# on choisit cette methode car la variable à expliquer ici quantité_vendue  est une donnée de comptage non bornée
+colonne_y<-"Quantité_Vendue"
+colonnes_X<-c("Promotion","Prix_Unitaire","Produit","Magasin","Date")
+
+formule<-as.formula(paste(
+colonne_y,"~",paste0(colonnes_X,collapse="+")
+))
+
+res_glm_poisson<-glm(formule,data=ventes1,family=poisson(link="log"))
+res_glm_gamma<-glm(formule,data=ventes1,family=Gamma(link="inverse"))
+
+#Deux modèles ont été testés : un GLM de Poisson et un GLM Gamma. Bien que le modèle Gamma présente un AIC plus faible, il n’est pas adapté à la nature de la variable étudiée. La quantité vendue étant une variable de comptage non bornées, le modèle de Poisson est théoriquement justifié.
+
+#Le modèle Gamma suppose une variable continue positive. Or la quantité vendue est une variable discrète. Donc même si l’ajustement numérique est meilleur : il est théoriquement incohérent avec la nature des données.
+
+
+#  on opte ici pour une démarche avec construction  de modèles emboîtés afin comprendre progressivement ce qui explique les ventes.
+
+
+
+m0 <- glm(Quantité_Vendue ~ Promotion, family=poisson(link="log"), data=ventes1) #Est-ce que les promotions influencent les ventes ?
+# ici il y a un soucis car le modèle ne consière que promotion  "oui"
+#Ce n’est pas un problème que R affiche seulement “PromotionOui”.
+#C’est normal car R prend automatiquement une modalité de référence (“Non”) et estime l’effet de “Oui” par rapport à elle.
+
+
+
+#La promotion est la variable marketing la plus directe, un produit en promotion doit thecniquement augmenter la demande.
+
+
+m1 <- glm(Quantité_Vendue ~ Promotion + Produit + Magasin,
+          family=poisson(link="log"), data=ventes1)
+
+m2 <- glm(Quantité_Vendue ~ Promotion + Produit + Magasin + Prix_Unitaire,
+          family=poisson(link="log"), data=ventes1)
+
+m3 <- glm(Quantité_Vendue ~ Promotion + Produit + Magasin + Prix_Unitaire + Date,
+          family=poisson(link="log"), data=ventes1) # pareil que res_glm_poisson
+
+AIC(m0)
+AIC(m1)
+AIC(m2)
+AIC(m3)
+#Le modèle le plus adapté est celui qui prend en compte toutes les variables
+summary(m3)
+
+#Toutes les variables explicatives ont des effets statistiques significatifs sur les quantités vendues
+#La promotion augmente significativement les ventes 
+
+
+
+
+
+
+# ici nous cherchons à déterminer quelle représentation du temps est la plus informative
+# au départ l'anne avait été inclue dans les modèles, mais nous l'avons retirer car nous estimions qu'elle n'avait aucun apport informative 
+
+
+
+# ici la question qu'on se pose est de savoir si les ventes changent-elles  selon les grandes périodes de l’année ?
+M4 <- glm(
+  Quantité_Vendue ~ Promotion + Produit + Magasin + Prix_Unitaire +
+    Saison ,
+  family = poisson(link="log"),
+  data = ventes1
+)
+summary(M4) 
+
+
+
+
+
+# les ventes dépendent-t'elles du mois ? sur certains mois on a des facteurs commes noel et le nouvel an dans le mois de décembre
+#juillet aout avec les vacances, ce qui expliquerai peut être une hausse des ventes 
+M5 <- glm(
+  Quantité_Vendue ~ Promotion + Produit + Magasin + Prix_Unitaire +
+    Mois ,
+  family = poisson(link="log"),
+  data = ventes1
+)
+
+summary(M5)
+
+
+# on se demande si les clients consomment plus le week-end, surtout que le facteurs liée au courses de fin de semaines peu influencer fortement
+M6 <- glm(
+  Quantité_Vendue ~ Promotion + Produit + Magasin + Prix_Unitaire +
+    Weekend,
+  family = poisson(link="log"),
+  data = ventes1
+)
+summary(M6) 
+
+
+
+
+M7 <- glm(
+  Quantité_Vendue ~ Promotion + Produit + Magasin + Prix_Unitaire +
+    Jour_semaine,
+  family = poisson(link="log"),
+  data = ventes1
+)
+summary(M7) 
+
+
+
+AIC(m0,m1,m2,m3,M4,M5,M6,M7)
+summary(M5) 
+
+# le meilleure modèle ici est le modèle M5 car il a l'AIC le plus faible.
+# toute les variables sont statistiquement significative.
+# les coefficients s’interprètent en pourcentage après exponentiation. L’estimation obtenue indique qu’une promotion entraîne une augmentation d’environ 38 % des ventes.
+# de plus les coefficients indiquent que les quantités vendues varient selon la nature du produit. Certains produit comme le pain ou encore le yaourt se vendent plus par rapport au produit de référence. ils  montrent également que certains magasins vendent  plus que d’autres, pour les mêmes produits, au même moment.
+
+```
+
+
+```{r}
+#Des analyses précédentes, on supposait que les charges des magasins impactaient leur rentabilité. Nous allons vérifier cela avec un modéle statistique
+
+#Etant donné que le chiffre d'affaires est fonction des quantités vendues, notre variable à expliquer est le "chiffre d'affaires". Etant donné que c'est une variable continue, le modèle approprié est un modèle gamma
+
+mod<-glm(chiffre_affaires ~ relevel(as.factor(magasin), ref = "Magasin_6") +
+                                depenses_fonctionnement +
+                                budget_publicite +
+                                masse_salariale,
+              family = Gamma(link = "inverse"),
+              data = finances)
+
+
+
+
+
+summary(mod)
+
+#Ce modèle met en évidence : une supériorité significative du chiffre d’affaires du Magasin_6 par rapport aux autres magasins . On note également un effet significatif de la masse salariale et aucun effet significatif des dépenses de fonctionnement ni du budget publicitaire
+
+#Ces résultats suggèrent que les différences de performance entre magasins sont davantage liées à leurs caractéristiques propres et à leur organisation interne qu’à leur niveau de dépenses publicitaires ou de fonctionnement.
+```
+
+
+
+
+
+
+
+
+
+
+
